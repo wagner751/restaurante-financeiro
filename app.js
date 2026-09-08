@@ -6999,11 +6999,27 @@ function renderizarPreviewOFX(transacoes) {
   }).join('');
 }
 
+// A coluna `ofx_criado` marca os lancamentos que NASCERAM de uma importacao de
+// extrato. Ela e o que separa "conta criada pelo OFX" de "conta que ja existia e
+// so foi carimbada com o ofx_id pelo reconhecimento automatico". Se o SQL ainda
+// nao foi rodado no Supabase, o app continua funcionando sem ela — so fica mais
+// conservador no Desfazer (nao apaga nada).
+let _ofxCriadoOk = null;
+async function temColunaOfxCriado(db) {
+  if (_ofxCriadoOk !== null) return _ofxCriadoOk;
+  try {
+    const { error } = await q(db.from('lancamentos').select('ofx_criado').limit(1));
+    _ofxCriadoOk = !error;
+  } catch (_) { _ofxCriadoOk = false; }
+  return _ofxCriadoOk;
+}
+
 async function desfazerImportacaoOFX(fitId, i) {
   if (!await garantirSessao()) return;
   if (!confirm('Desfazer esta importação? O lançamento voltará para pendente e a transação poderá ser reimportada.')) return;
 
   const db = obterSupabase();
+  let naoApagou = null;   // preenchido quando a conta já existia e foi só desvinculada
 
   // Verifica se foi conciliado com lançamento existente (registro em pagamentos)
   const { data: pagamentos } = await q(
@@ -7023,16 +7039,44 @@ async function desfazerImportacaoOFX(fitId, i) {
       await q(db.from('lancamentos').update(upd).eq('id', pag.lancamento_id));
     }
   } else {
-    // Foi criado como novo lançamento — deleta o lançamento inteiro
+    // Sem registro em `pagamentos` existem DOIS casos bem diferentes:
+    //
+    //  a) o lançamento nasceu desta importação (bloco "Criar", "Dividir por
+    //     unidade" ou "Dividir pedido") — desfazer tem mesmo que apagar;
+    //  b) a conta a pagar JÁ EXISTIA (veio do estoque, ou foi digitada e marcada
+    //     como paga na mão) e o reconhecimento automático da tela de Conciliação
+    //     apenas CARIMBOU o ofx_id nela, sem gravar pagamento nenhum
+    //     (autoMatchConciliacao, no fallback por banco+data+valor).
+    //
+    // Antes os dois caíam no delete: desfazer a conciliação APAGAVA a conta a
+    // pagar inteira, sem aviso e sem log. Foi assim que o Pedido #01202
+    // (RAL EMPREENDIMENTOS, R$ 371,82, venc. 08/09/2026) sumiu do Contas a
+    // Pagar em 08/09/2026 — e o pedido voltou para "Enviar Financeiro" no
+    // estoque, porque lá a situação é lida pela existência do lançamento.
+    //
+    // Agora só o caso (a) apaga. No caso (b) a conta é desvinculada e volta
+    // para pendente, que é o que a pessoa espera de um "Desfazer".
+    const temCol = await temColunaOfxCriado(db);
+    const cols   = temCol ? 'id, descricao, ofx_criado' : 'id, descricao';
     const { data: lanc } = await q(
-      db.from('lancamentos').select('id').eq('ofx_id', fitId).maybeSingle()
+      db.from('lancamentos').select(cols).eq('ofx_id', fitId).maybeSingle()
     );
-    if (lanc) {
+    if (lanc && lanc.ofx_criado === true) {
       await q(db.from('lancamentos').delete().eq('id', lanc.id));
+    } else if (lanc) {
+      await q(db.from('lancamentos').update({
+        ofx_id:         null,
+        status:         'pendente',
+        data_pagamento: null,
+        valor_pago:     0
+      }).eq('id', lanc.id));
+      naoApagou = lanc.descricao || 'A conta';
     }
   }
 
-  mostrarToast('Conciliação desfeita. Selecione o lançamento correto.', 'sucesso');
+  mostrarToast(naoApagou
+    ? `"${naoApagou}" já existia antes da importação: voltou para pendente e NÃO foi apagada.`
+    : 'Conciliação desfeita. Selecione o lançamento correto.', 'sucesso');
 
   // Reativa a transação na tela
   await carregarLancamentosPendentes();
@@ -8055,6 +8099,11 @@ async function importarTransacoes() {
     }
   }
 
+  // Marca o que nasce desta importação, para o Desfazer saber o que pode apagar
+  // (e o que é conta que já existia e só pode ser desvinculada). Se a coluna
+  // ainda não existe no banco, fica vazio e o insert continua funcionando.
+  const marcaOFX = (await temColunaOfxCriado(db)) ? { ofx_criado: true } : {};
+
   // Transferências entre contas
   for (const t of aTransferencias) {
     const origemId  = t.tipo === 'pagar'   ? bancoId : t.transferencia_destino_id;
@@ -8082,7 +8131,8 @@ async function importarTransacoes() {
         plano_conta_id: split.plano_conta_id || t.plano_conta_id || null,
         banco_id:       bancoId,
         ofx_id:         t.fitId || null,
-        unidade_id:     split.unidade_id || null
+        unidade_id:     split.unidade_id || null,
+        ...marcaOFX
       }));
       if (error) erros++;
     }
@@ -8266,6 +8316,7 @@ async function importarTransacoes() {
         numero_pedido:  dp.numero_pedido || null,
         plano_conta_id: isRateio ? null : (dp.categorias[0]?.plano_conta_id || null),
         tem_rateio:     isRateio,
+        ...marcaOFX
       }).select('id').single());
       if (error || !novo) { erros++; falhou = true; continue; }
       if (!primeiroId) primeiroId = novo.id;
@@ -8305,7 +8356,8 @@ async function importarTransacoes() {
       banco_id:        bancoId,
       ofx_id:          t.fitId || null,
       unidade_id:      t.unidade_id || null,
-      ...(t.tipo === 'pagar' && t.centro_custo_id ? { centro_custo_id: t.centro_custo_id } : {})
+      ...(t.tipo === 'pagar' && t.centro_custo_id ? { centro_custo_id: t.centro_custo_id } : {}),
+      ...marcaOFX
     }));
     const { error } = await q(db.from('lancamentos').insert(novos))
     if (error) erros++;
