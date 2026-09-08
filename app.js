@@ -408,6 +408,7 @@ function irPara(pagina, elemento) {
   if (pagina === 'orcamento')        carregarOrcamentoModo();
   if (pagina === 'relatorios')       carregarRelatorio();
   if (pagina === 'pacote-contabil')   carregarPacoteContabil();
+  if (pagina === 'excluidos')         carregarExcluidos();
   if (pagina === 'dre')              carregarDre();
   if (pagina === 'ponte-caixa')      carregarPonteCaixa();
   if (pagina === 'usuarios')         carregarUsuarios();
@@ -426,7 +427,7 @@ function irPara(pagina, elemento) {
     'fornecedores': 'cadastros', 'centros-custo': 'cadastros', 'formas-pagamento': 'cadastros', 'taxas-cartao': 'cadastros',
     'dre': 'relatorios', 'ponte-caixa': 'relatorios', 'relatorios': 'relatorios',
     'pacote-contabil': 'relatorios',
-    'usuarios': 'configuracoes', 'configuracoes': 'configuracoes'
+    'usuarios': 'configuracoes', 'configuracoes': 'configuracoes', 'excluidos': 'configuracoes'
   };
   if (grupoNavPorPagina[pagina]) expandirNavGrupo(grupoNavPorPagina[pagina]);
 
@@ -2593,6 +2594,7 @@ function excluirLancamento(id) {
   fnExcluirAtual = async () => {
     const db = obterSupabase();
     const { error } = await q(db.from('lancamentos').delete().eq('id', idParaExcluir))
+    await marcarOrigemExclusao(db, idParaExcluir, 'Botão Excluir (Contas a Pagar/Receber)');
     fecharModal('modal-excluir');
     if (error) { mostrarToast('Erro ao excluir.', 'erro'); return; }
     mostrarToast('Lançamento excluído!', 'sucesso');
@@ -5188,6 +5190,7 @@ async function cxqConfirmar(confId) {
     // Nada entrou (ex.: contaram zero num caixa que só teve estorno). Deixar um
     // recebimento de valor zero ou negativo no Contas a Receber só confundiria.
     const { error } = await db.from('lancamentos').delete().eq('id', recId);
+    await marcarOrigemExclusao(db, recId, 'Conciliação do Dinheiro (caixa sem sobra)');
     if (error) { mostrarToast('Erro ao remover o recebimento antigo: ' + error.message, 'erro'); return; }
     recId = null;
   } else if (receber > 0 && !caixaBanco) {
@@ -5307,7 +5310,10 @@ async function cxqDesfazerDif(confId) {
   if (!(await garantirSessao())) return;
   const db = obterSupabase();
   const { data: c } = await db.from('caixa_dia_conf').select('dif_lancamento_id').eq('id', confId).single();
-  if (c && c.dif_lancamento_id) await db.from('lancamentos').delete().eq('id', c.dif_lancamento_id);
+  if (c && c.dif_lancamento_id) {
+    await db.from('lancamentos').delete().eq('id', c.dif_lancamento_id);
+    await marcarOrigemExclusao(db, c.dif_lancamento_id, 'Conciliação do Dinheiro (desfazer diferença)');
+  }
   const { error } = await db.from('caixa_dia_conf').update({ dif_lancamento_id: null }).eq('id', confId);
   if (error) { mostrarToast('Erro ao desfazer: ' + error.message, 'erro'); return; }
   mostrarToast('Lançamento da diferença desfeito', 'sucesso');
@@ -5318,7 +5324,10 @@ async function cxqDesfazer(movId) {
   if (!confirm('Desfazer este lançamento? A despesa some do Contas a Pagar.')) return;
   const db = obterSupabase();
   const { data: m } = await db.from('caixa_movimentos').select('lancamento_id').eq('id', movId).single();
-  if (m && m.lancamento_id) await db.from('lancamentos').delete().eq('id', m.lancamento_id);
+  if (m && m.lancamento_id) {
+    await db.from('lancamentos').delete().eq('id', m.lancamento_id);
+    await marcarOrigemExclusao(db, m.lancamento_id, 'Conciliação do Dinheiro (desfazer pagamento em dinheiro)');
+  }
   const { error } = await db.from('caixa_movimentos').update({ status: 'pendente', lancamento_id: null, plano_conta_id: null, processado_por: null, processado_em: null }).eq('id', movId);
   if (error) { mostrarToast('Erro ao desfazer: ' + error.message, 'erro'); return; }
   mostrarToast('Lançamento desfeito', 'sucesso');
@@ -5418,7 +5427,10 @@ async function excluirCaixaEspecie(data) {
   const db = obterSupabase();
   let ex = null;
   try { const { data: a } = await db.from('caixa_fechamentos').select('*').eq('data', data).limit(1); ex = a && a[0]; } catch (e) {}
-  if (ex && ex.lancamento_id) { await db.from('lancamentos').delete().eq('id', ex.lancamento_id); }
+  if (ex && ex.lancamento_id) {
+    await db.from('lancamentos').delete().eq('id', ex.lancamento_id);
+    await marcarOrigemExclusao(db, ex.lancamento_id, 'Conciliação do Dinheiro (desfazer sangria/suprimento)');
+  }
   const { error } = await db.from('caixa_fechamentos').delete().eq('data', data);
   if (error) { mostrarToast('Erro ao reabrir: ' + error.message, 'erro'); return; }
   mostrarToast('Conferência reaberta', 'sucesso');
@@ -7063,6 +7075,7 @@ async function desfazerImportacaoOFX(fitId, i) {
     );
     if (lanc && lanc.ofx_criado === true) {
       await q(db.from('lancamentos').delete().eq('id', lanc.id));
+      await marcarOrigemExclusao(db, lanc.id, 'Desfazer conciliação do extrato (lançamento criado pelo OFX)');
     } else if (lanc) {
       await q(db.from('lancamentos').update({
         ofx_id:         null,
@@ -8340,6 +8353,7 @@ async function importarTransacoes() {
       await q(db.from('cmp_contas_pagar').update({ lancamento_id: primeiroId }).eq('lancamento_id', dp.lancamentoId)).catch(() => {});
       await q(db.from('rateio_itens').delete().eq('lancamento_id', dp.lancamentoId)).catch(() => {});
       await q(db.from('lancamentos').delete().eq('id', dp.lancamentoId));
+      await marcarOrigemExclusao(db, dp.lancamentoId, 'Dividir Pedido na conciliação do extrato');
     }
   }
 
@@ -12162,4 +12176,129 @@ function pkBaixar(i) {
 function pkBaixarTodos() {
   if (!_pkDados) return;
   _pkDados.pacotes.forEach((p, i) => setTimeout(() => pkBaixar(i), i * 900));
+}
+
+// =========================================================
+// CONTAS EXCLUÍDAS — log de exclusões de lançamento
+//
+// Quem grava é um gatilho no banco (trg_log_exclusao_lancamento, criado por
+// SQL_LOG_EXCLUSAO_LANCAMENTOS.sql), não o aplicativo. Isso é de propósito:
+// assim o log pega exclusão feita por qualquer tela do financeiro, pelo sistema
+// de compras, pelos robôs ou por SQL rodado na mão.
+//
+// O app só faz duas coisas aqui: mostrar o log, e carimbar a coluna `origem`
+// logo depois de apagar, para dizer de qual botão a exclusão partiu — que é a
+// informação que faltou quando o Pedido #01202 sumiu em 08/09/2026.
+// =========================================================
+
+let _excLinhas = [];
+
+// Carimba de onde partiu a exclusão. Best-effort: se falhar, o log continua lá
+// com tudo o que importa (o que era, quem apagou, quando) — só sem o botão.
+// `origem` é a ÚNICA coluna que o app tem permissão de escrever nesta tabela.
+async function marcarOrigemExclusao(db, lancamentoId, origem) {
+  if (!lancamentoId) return;
+  try {
+    await db.from('lancamentos_excluidos')
+      .update({ origem })
+      .eq('lancamento_id', lancamentoId)
+      .is('origem', null);
+  } catch (_) { /* log nunca atrapalha a operação */ }
+}
+
+async function carregarExcluidos() {
+  const corpo = document.getElementById('exc-corpo');
+  if (!corpo) return;
+
+  // Padrão: últimos 30 dias, para a tela abrir leve.
+  const elIni = document.getElementById('exc-ini');
+  const elFim = document.getElementById('exc-fim');
+  if (elIni && !elIni.value) {
+    const d = new Date(); d.setDate(d.getDate() - 30);
+    elIni.value = d.toISOString().split('T')[0];
+  }
+  if (elFim && !elFim.value) elFim.value = new Date().toISOString().split('T')[0];
+
+  corpo.innerHTML = `<tr><td colspan="7" style="text-align:center;padding:24px;color:#888">Carregando…</td></tr>`;
+
+  const db  = obterSupabase();
+  const ini = elIni?.value || '2000-01-01';
+  const fim = (elFim?.value || '2999-12-31') + 'T23:59:59.999Z';
+
+  try {
+    _excLinhas = await fetchTodosPag((de, ate) =>
+      db.from('lancamentos_excluidos')
+        .select('id, lancamento_id, descricao, valor, vencimento, tipo, status, numero_pedido, excluido_em, excluido_por_email, origem')
+        .gte('excluido_em', ini)
+        .lte('excluido_em', fim)
+        .order('excluido_em', { ascending: false })
+        .range(de, ate)
+    );
+  } catch (e) {
+    _excLinhas = [];
+  }
+
+  // Tabela ainda não existe: o SQL não foi rodado.
+  if (!_excLinhas.length) {
+    const { error } = await q(db.from('lancamentos_excluidos').select('id').limit(1));
+    if (error) {
+      corpo.innerHTML = `<tr><td colspan="7" style="text-align:center;padding:28px;color:#c0392b">
+        O log ainda não foi criado no banco.<br>
+        <span style="color:#888;font-size:.9rem">Rode o arquivo SQL_LOG_EXCLUSAO_LANCAMENTOS.sql no Supabase.</span>
+      </td></tr>`;
+      document.getElementById('exc-resumo').textContent = '';
+      return;
+    }
+  }
+  renderExcluidos();
+}
+
+function renderExcluidos() {
+  const corpo = document.getElementById('exc-corpo');
+  if (!corpo) return;
+  const termo = (document.getElementById('exc-busca')?.value || '').trim().toLowerCase();
+
+  const linhas = !termo ? _excLinhas : _excLinhas.filter(l =>
+    [l.descricao, l.numero_pedido, l.excluido_por_email, l.origem]
+      .some(v => (v || '').toLowerCase().includes(termo)));
+
+  const resumo = document.getElementById('exc-resumo');
+  if (resumo) {
+    const total = linhas.reduce((s, l) => s + Math.abs(Number(l.valor) || 0), 0);
+    resumo.innerHTML = linhas.length
+      ? `<strong>${linhas.length}</strong> conta(s) excluída(s) no período — ${formatarMoeda(total)} no total.`
+      : '';
+  }
+
+  if (!linhas.length) {
+    corpo.innerHTML = `<tr><td colspan="7" style="text-align:center;padding:28px;color:#27ae60">
+      Nenhuma conta foi excluída no período. 👍
+    </td></tr>`;
+    return;
+  }
+
+  const txt = v => String(v == null ? '' : v)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+  const quando = iso => {
+    const d = new Date(iso);
+    const dd = n => String(n).padStart(2, '0');
+    return `${dd(d.getDate())}/${dd(d.getMonth() + 1)}/${d.getFullYear()}<br>
+            <span style="color:#999;font-size:.85em">${dd(d.getHours())}:${dd(d.getMinutes())}</span>`;
+  };
+
+  corpo.innerHTML = linhas.map(l => {
+    const ent = l.tipo === 'receber';
+    return `<tr>
+      <td style="font-size:.9em">${quando(l.excluido_em)}</td>
+      <td style="font-size:.9em">${txt(l.excluido_por_email) ||
+        '<span style="color:#999" title="Exclusão feita por robô ou direto no banco, sem usuário logado">(sem usuário)</span>'}</td>
+      <td>${txt(l.descricao) || '<span style="color:#999">(sem descrição)</span>'}
+        <span style="color:#999;font-size:.85em"> · ${ent ? 'a receber' : 'a pagar'} · ${txt(l.status)}</span></td>
+      <td style="text-align:right;font-weight:600;color:${ent ? '#27ae60' : '#c0392b'}">${formatarMoeda(l.valor || 0)}</td>
+      <td style="font-size:.9em">${formatarData(l.vencimento)}</td>
+      <td style="font-size:.9em">${txt(l.numero_pedido) || '-'}</td>
+      <td style="font-size:.9em;color:#666">${txt(l.origem) || '<span style="color:#bbb">—</span>'}</td>
+    </tr>`;
+  }).join('');
 }

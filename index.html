@@ -185,6 +185,9 @@
             <a href="#" class="nav-item nav-subitem" onclick="return irPara('configuracoes', this)">
               <i class="fas fa-hdd"></i><span>Backup</span>
             </a>
+            <a href="#" class="nav-item nav-subitem" onclick="return irPara('excluidos', this)">
+              <i class="fas fa-trash-can-arrow-up"></i><span>Contas Excluídas</span>
+            </a>
           </div>
         </div>
       </nav>
@@ -1449,6 +1452,56 @@
       </section>
 
       <!-- ========== PACOTE CONTÁBIL ========== -->
+      <!-- ===== CONTAS EXCLUÍDAS (log de exclusões) ===== -->
+      <section id="pagina-excluidos" class="pagina">
+        <div class="pagina-header">
+          <h2><i class="fas fa-trash-can-arrow-up" style="color:#c0392b"></i> Contas Excluídas</h2>
+          <p style="color:#888;font-size:.9rem;margin-top:4px">
+            Toda conta apagada fica registrada aqui — o que era, quem apagou e quando.
+            O registro é feito pelo banco de dados, então pega exclusão feita em qualquer tela,
+            no sistema de compras ou pelos robôs.
+          </p>
+        </div>
+
+        <div class="filtros" style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;margin-bottom:16px">
+          <div class="form-group" style="margin:0">
+            <label>De</label>
+            <input type="date" id="exc-ini" onchange="carregarExcluidos()">
+          </div>
+          <div class="form-group" style="margin:0">
+            <label>Até</label>
+            <input type="date" id="exc-fim" onchange="carregarExcluidos()">
+          </div>
+          <div class="form-group" style="margin:0;flex:1;min-width:220px">
+            <label>Buscar</label>
+            <input type="text" id="exc-busca" placeholder="descrição, nº do pedido ou quem apagou"
+                   oninput="renderExcluidos()">
+          </div>
+          <button class="btn btn-secundario" onclick="carregarExcluidos()">
+            <i class="fas fa-rotate"></i> Atualizar
+          </button>
+        </div>
+
+        <div id="exc-resumo" style="color:#666;font-size:.9rem;margin-bottom:10px"></div>
+
+        <div class="tabela-box">
+          <table class="tabela">
+            <thead>
+              <tr>
+                <th style="width:140px">Quando</th>
+                <th style="width:180px">Quem apagou</th>
+                <th>O que era</th>
+                <th style="width:110px;text-align:right">Valor</th>
+                <th style="width:100px">Vencimento</th>
+                <th style="width:90px">Pedido</th>
+                <th style="width:160px">De onde</th>
+              </tr>
+            </thead>
+            <tbody id="exc-corpo"></tbody>
+          </table>
+        </div>
+      </section>
+
       <section id="pagina-pacote-contabil" class="pagina">
         <div class="pagina-header">
           <h2><i class="fas fa-file-contract" style="color:#2c3e50"></i> Pacote Contábil</h2>
